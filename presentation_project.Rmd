@@ -23,9 +23,207 @@ library(viridis)
 
 # Data resource
 
-[Explanation required]
+The data frame contains microarray gene expression data, with each row corresponding to a gene and each column representing expression levels at different time points. The data includes the mean (Mean), number of data points (n), and standard error (SE). For the 0 DAA time point, only one biological replicate was sampled. For other time points, the data is based on two biological replicates and two technical replicates. In some cases, data points were excluded for technical reasons, so the mean and standard error are only calculated based on the remaining data.
 
 ```{r}
+apple_exp = read_excel("Apple_DAA_expression.xls",col_types = "text")
+dim(apple_exp)
+```   
 
+There are 15987 genes and 8 time point, DAA stands for Days After Anthesis.
+
+```{r}
+# general check on the df info
+
+apple_exp %>%
+  mutate(across(ends_with("Mean"), as.numeric)) %>%
+  select(ends_with("Mean")) %>%
+  summary()
 ```
+
+Usually, when the missing values were caused by very low expression values or not detected, they were generally replaced by 0. 
+However, according to the article, the NA part of this data frame was excluded for technical reasons, so here we employed an exclusion strategy, i.e., we did not select the genes containing the missing values for the subsequent analysis.
+
+
+```{r}
+apple_exp = apple_exp %>%
+  mutate(across(ends_with("Mean"), as.numeric)) %>%
+  select(`Genbank number`,ends_with("Mean")) %>% # SE and n is good to know, but not for subsequent analysis
+  drop_na()
+
+dim(apple_exp) # 836 genes excluded, 5%. Validation required later.
+```
+
+# PCA
+
+```{r}
+apple_exp_log = apple_exp %>%
+  mutate(across(ends_with("Mean"), ~ log10(. + 1))) # log transform the df
+
+ggplot(apple_exp_log, aes(x = `0 DAA Mean`)) +
+  geom_histogram(bins = 30) # The data distribution is still skewed due to the low expression values of most genes, but it is better than using raw values
+```
+
+
+```{r}
+apple_pca = prcomp(t(apple_exp_log[, -1]))
+apple_pca_imp = as.data.frame(t(summary(apple_pca)$importance))
+apple_pca_coord = apple_pca$x[, 1:8] %>% # Take the all 8 PCs
+  as.data.frame() %>% 
+  mutate(timepoint = row.names(.)) # rownames to col
+apple_pca_coord
+```
+
+According to the paper, DAA and the fruit development stage have a certain corresponding relationship:
+
+0-35 DAA : Cell division
+60-87 DAA : Starch accumulation
+132-146 DA : Ripening
+
+As we don't have many combination of the libraries, we won't expect a strong explanation by stage but it worth a look.
+
+```{r}
+# mutate a stage column
+apple_pca_coord = apple_pca_coord %>%
+  mutate(stage = case_when(
+    timepoint %in% c("0 DAA Mean", "14 DAA Mean", "25 DAA Mean", "35 DAA Mean") ~ "Cell division",
+    timepoint %in% c("60 DAA Mean", "87 DAA Mean") ~ "Starch accumulation",
+    timepoint %in% c("132 DAA Mean", "146 DAA Mean") ~ "Ripening",
+    TRUE ~ "Unknown"
+  )) %>%
+  mutate(timepoint = str_replace(timepoint, " Mean", "")) # Remove the "Mean" word in timepoint col
+
+apple_pca_coord %>% 
+  ggplot(aes(x = PC1, y = PC2)) +
+  geom_point(aes(fill = stage), color = "grey20", shape = 21, size = 3, alpha = 0.8) +
+   scale_fill_manual(values = c("Cell division" = "#1b9e77", "Starch accumulation" = "#d95f02", "Ripening" = "#7570b3")) +
+  labs(x = paste("PC1 (", apple_pca_imp[1, 2] %>% signif(3)*100, "% of Variance)", sep = ""), 
+       y = paste("PC2 (", apple_pca_imp[2, 2] %>% signif(3)*100, "% of Variance)", "  ", sep = ""),
+       fill = "stage") +  
+  theme_bw() +
+  theme(
+    text = element_text(size= 14),
+    axis.text = element_text(color = "black")
+  )
+```
+
+Since PCA is performed based on gene expression data at different time points, this naturally causes different developmental stages to show some separation in PCA space. 
+However, PCA itself is unsupervised and does not know the order of time points, while we see the ordering of PC1 is consistent with the order of time points, and the interval between different stages is obvious. This suggests that the closer the time is to late development, the expression pattern will gradually change, and PCA has captured this feature.
+
+# Bait gene
+
+[Leave blank for now.]
+
+# Duplicated genes
+
+```{r}
+apple_exp_log %>%
+  dim()
+```
+
+```{r}
+apple_exp_log %>%
+  distinct(`Genbank number`) %>%
+  dim()
+```
+
+We notice that 15151 > 14902. There must be duplicated combination:
+
+The reason for this "duplication" is that we deleted the ESTs (Expressed Sequence Tags) column at the beginning of the data processing and used the Genbank number as the gene identification.
+
+This may represent different fragments or transcripts of the same gene. We should alter based on the gene identification to differentiate them.
+
+```{r}
+apple_exp_log = apple_exp_log %>%
+  group_by(`Genbank number`) %>%
+  mutate(gene = case_when( # mutate a new col 
+    n() > 1 ~ paste0(`Genbank number`, "_", row_number()), # "duplicates" will have more than 1 row. Add a symbol.
+    TRUE ~ `Genbank number` # keep the same for those not_duplicated
+  )) %>%
+  ungroup() # %>%
+  # filter(gene != `Genbank number`) # how to check for the altered rows
+```
+
+
+# Gene selection
+
+```{r}
+# long version
+apple_exp_log_long = apple_exp_log %>%
+  rename_with(~ gsub(" Mean", "", .), contains("DAA")) %>% # Remove the "Mean" in colnames
+  pivot_longer(
+    cols = starts_with("0 DAA"):starts_with("146 DAA"), 
+    names_to = "timepoint", 
+    values_to = "log_exp"
+  ) 
+```
+
+As we know, the number of correlations scales to the square of number of genes.
+In order to calculate gene correlation between each other, 15000+ genes are too much. 
+We can select only the high variance genes, as a gene is unlikely to be involved in a particular stage if it's expressed at a similar level across all timepoints.
+
+
+```{r}
+# Calculate the rank
+apple_var_rank = apple_exp_log_long %>% 
+  group_by(gene) %>% 
+  summarise(var = var(log_exp)) %>% # calculate the variance for each gene
+  ungroup() %>% 
+  mutate(rank = rank(var, ties.method = "average")) # rank the genes
+
+head(apple_var_rank)
+```
+
+```{r}
+# If we take the top 1/3 of the highest variance genes
+high_var_apple = apple_exp_log_long %>% 
+  group_by(gene) %>% 
+  summarise(var = var(log_exp)) %>% 
+  ungroup() %>% 
+  filter(var > quantile(var, 0.667)) 
+
+# And take the top 3000
+high_var_apple3000 = high_var_apple %>% 
+  slice_max(order_by = var, n = 3000) 
+```
+
+
+```{r}
+# Check whether top 3000 can represent the genes of highest variance
+apple_var_rank %>% 
+  ggplot(aes(x = var, y = rank)) +
+   geom_rect( 
+    xmax = max(high_var_apple3000$var), 
+    xmin = min(high_var_apple3000$var),
+    ymax = nrow(apple_var_rank),
+    ymin = nrow(apple_var_rank) - 3000,
+    fill = "dodgerblue2", alpha = 0.2
+    ) +
+  geom_line(size = 1.1) +
+  labs(y = "rank",
+       x = "variance",
+       caption = "Blue box = top 3000 high var genes.") +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black"),
+    plot.caption = element_text(hjust = 0)
+  )
+```
+
+It looks like if we take the top 3000 genes, it takes pretty much the entire upper elbow of the graph.
+
+
+[Add vertical line to verify after select the bait genes]
+
+```{r}
+# Select high var gene
+apple_exp_log_highvar = apple_exp_log_long %>% 
+  filter(gene %in% high_var_apple3000$gene)
+dim(apple_exp_log_highvar)
+```
+
+
+# Gene-wise correlation
+
 
