@@ -112,7 +112,7 @@ However, PCA itself is unsupervised and does not know the order of time points, 
 
 # Bait gene
 
-[Leave blank for now.]
+> Leave blank for now.
 
 # Duplicated genes
 
@@ -214,7 +214,7 @@ apple_var_rank %>%
 It looks like if we take the top 3000 genes, it takes pretty much the entire upper elbow of the graph.
 
 
-[Add vertical line to verify after select the bait genes]
+> Add vertical line to verify after select the bait genes
 
 ```{r}
 # Select high var gene
