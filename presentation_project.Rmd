@@ -10,6 +10,8 @@ Here we use another data set trying to go through the same workflow.
 # Package requirement
 
 ```{r}
+library(svglite)
+library(limma)
 library(tidyverse)
 library(ggplot2)
 library(igraph)
@@ -23,7 +25,7 @@ library(viridis)
 
 # Data resource
 
-The data frame contains microarray gene expression data, with each row corresponding to a gene and each column representing expression levels at different time points. The data includes the mean (Mean), number of data points (n), and standard error (SE). For the 0 DAA time point, only one biological replicate was sampled. For other time points, the data is based on two biological replicates and two technical replicates. In some cases, data points were excluded for technical reasons, so the mean and standard error are only calculated based on the remaining data.
+Malus domestica. The data frame contains microarray gene expression data, with each row corresponding to a gene and each column representing expression levels at different time points. The data includes the mean (Mean), number of data points (n), and standard error (SE). For the 0 DAA time point, only one biological replicate was sampled. For other time points, the data is based on two biological replicates and two technical replicates. In some cases, data points were excluded for technical reasons, so the mean and standard error are only calculated based on the remaining data.
 
 ```{r}
 apple_exp = read_excel("Apple_DAA_expression.xls",col_types = "text")
@@ -54,7 +56,24 @@ apple_exp = apple_exp %>%
 dim(apple_exp) # 836 genes excluded, 5%. Validation required later.
 ```
 
+```{r,eval=FALSE}
+write.table(apple_exp %>%
+  distinct(`Genbank number`), "genbank_apple.csv", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+
 # PCA
+
+```{r}
+
+ggplot(apple_exp, aes(x = `0 DAA Mean`)) +
+  geom_histogram(bins = 30) 
+
+ggsave("hist_before.svg", height = 3, width = 4, bg ="white")
+ggsave("hist_before.png", height = 3, width = 4, bg ="white")
+# dev.off()
+```
+
 
 ```{r}
 apple_exp_log = apple_exp %>%
@@ -62,6 +81,9 @@ apple_exp_log = apple_exp %>%
 
 ggplot(apple_exp_log, aes(x = `0 DAA Mean`)) +
   geom_histogram(bins = 30) # The data distribution is still skewed due to the low expression values of most genes, but it is better than using raw values
+
+ggsave("hist_after.svg", height = 3, width = 4, bg ="white")
+ggsave("hist_after.png", height = 3, width = 4, bg ="white")
 ```
 
 
@@ -105,6 +127,9 @@ apple_pca_coord %>%
     text = element_text(size= 14),
     axis.text = element_text(color = "black")
   )
+
+ggsave("pca_apple.svg", height = 4, width = 8, bg ="white")
+ggsave("pca_apple.png", height = 4, width = 8, bg ="white")
 ```
 
 Since PCA is performed based on gene expression data at different time points, this naturally causes different developmental stages to show some separation in PCA space. 
@@ -112,7 +137,17 @@ However, PCA itself is unsupervised and does not know the order of time points, 
 
 # Bait gene
 
-> Leave blank for now.
+As the rows in the matrix are not actual gene names, and I didn't map the probes to the genes, it's hard to get the bait genes. However, the paper provide three core cell cycle genes, which are:
+EB107042: CDKB1;2 homologue,
+CN943384: CDKB2;2 homologue,
+EB141951: CKS1 homologue
+
+We'll use this three to serve as bait gene
+
+```{r}
+bait_genes = c("EB107042","CN943384","EB141951")
+```
+
 
 # Duplicated genes
 
@@ -187,6 +222,11 @@ high_var_apple3000 = high_var_apple %>%
   slice_max(order_by = var, n = 3000) 
 ```
 
+```{r}
+bait_var = apple_var_rank %>%
+  filter(gene %in% bait_genes) 
+```
+
 
 ```{r}
 # Check whether top 3000 can represent the genes of highest variance
@@ -199,6 +239,14 @@ apple_var_rank %>%
     ymin = nrow(apple_var_rank) - 3000,
     fill = "dodgerblue2", alpha = 0.2
     ) +
+  geom_hline(
+    data = bait_var, aes(yintercept = rank),
+    color = "tomato1", size = 0.8, alpha = 0.5
+  ) +
+  geom_vline(
+    data = bait_var, aes(xintercept = var), 
+    color = "tomato1", size = 0.8, alpha = 0.5
+  ) + 
   geom_line(size = 1.1) +
   labs(y = "rank",
        x = "variance",
@@ -209,12 +257,13 @@ apple_var_rank %>%
     axis.text = element_text(color = "black"),
     plot.caption = element_text(hjust = 0)
   )
+
+ggsave("highvar3000.svg", height = 4, width = 5, bg ="white")
+ggsave("highvar3000.png", height = 4, width = 5, bg ="white")
 ```
 
-It looks like if we take the top 3000 genes, it takes pretty much the entire upper elbow of the graph.
+It looks like if we take the top 3000 genes, it takes pretty much the entire upper elbow of the graph. And all the bait genes are just included.
 
-
-> Add vertical line to verify after select the bait genes
 
 ```{r}
 # Select high var gene
@@ -224,6 +273,531 @@ dim(apple_exp_log_highvar)
 ```
 
 
+```{r,eval=FALSE}
+filtered_genes <- apple_exp_log_highvar %>%
+  distinct(`Genbank number`)
+
+write.table(filtered_genes, "high_var_apple.csv", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+
 # Gene-wise correlation
 
+```{r}
+# pivot wider for as input for correlation
+highvar_log_wide = apple_exp_log_highvar %>%
+  dplyr::select(gene,timepoint,log_exp) %>%
+  pivot_wider(names_from = timepoint, values_from = log_exp) %>%
+  as.data.frame()
+
+row.names(highvar_log_wide) <- highvar_log_wide$gene
+head(highvar_log_wide)
+```
+
+```{r}
+# correlate genes with each other
+# As we not only focus on the trend, the value itself matters, we still use default setting for correlation (Pearson)
+cor_matrix = cor(t(highvar_log_wide[, -1]))
+dim(cor_matrix)
+```
+
+# Edge selection 
+
+```{r}
+# In order to filter out the not meaning full relationships
+# We use t distribution approximation, as for each correlation coeff (r), we can approximate a t statistics, under some arbitrary assumptions
+n_daa = ncol(highvar_log_wide) -1
+
+# deduplicate the lower part for the cor matrix
+cor_matrix_upper_tri <- cor_matrix
+cor_matrix_upper_tri[lower.tri(cor_matrix_upper_tri)] <- NA
+
+# t = r*sqrt((n-2)/(1-r^2))
+edge_table <- cor_matrix_upper_tri %>% 
+  as.data.frame() %>% 
+  mutate(from = row.names(cor_matrix)) %>% 
+  pivot_longer(cols = !from, names_to = "to", values_to = "r") %>% 
+  filter(is.na(r) == F) %>% 
+  filter(from != to) %>% 
+  mutate(t = r*sqrt((n_daa-2)/(1-r^2))) %>% 
+  mutate(p.value = case_when(
+    t > 0 ~ pt(t, df = n_daa-2, lower.tail = F),
+    t <=0 ~ pt(t, df = n_daa-2, lower.tail = T)
+  )) %>% 
+  mutate(FDR = p.adjust(p.value, method = "fdr")) 
+
+head(edge_table)
+```
+
+
+```{r}
+edge_table %>% 
+  filter(r > 0) %>% 
+  filter(FDR < 0.01) %>% 
+  slice_min(order_by = abs(r), n = 10) # FDR cut off at 0.05, r > 0.9; cut off at 0.01, r > 0.97
+```
+
+
+```{r}
+# Visualize the distribution of r
+edge_table %>% 
+  ggplot(aes(x = r)) +
+  geom_histogram(color = "white", bins = 100) +
+  geom_vline(xintercept = 0.7, color = "tomato1", size = 1.2) +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black")
+  )
+
+ggsave("edge_table_distribution.svg", height = 4, width = 5, bg ="white")
+ggsave("edge_table_distribution.png", height = 4, width = 5, bg ="white")
+```
+
+The more strict the cutoff, the "fewer" relationship will be used to contrust the co-expression network
+Looks like at r > 0.7 (red line), the distribution trails off rapidly.
+
+```{r}
+# bait gene co-expression
+edge_table %>%
+  filter(str_detect(from,"EB107042") & str_detect(to, "CN943384") | str_detect(from,"CN943384") & str_detect(to, "EB107042") | 
+           str_detect(from,"EB141951") & str_detect(to, "CN943384") | str_detect(from,"CN943384") & str_detect(to, "EB141951") | 
+           str_detect(from,"EB107042") & str_detect(to, "EB141951") | str_detect(from,"EB141951") & str_detect(to, "EB107042"))
+```
+
+We can see that one of the bait gene seems not to be having that high relationship with the other two. According to the paper, we can see the trend from the 0 DAA to 14 DAA of EB107042 does vary from the others. So as recommended by the workflow, it's still good to use 0.7 as a cut off.
+
+```{r}
+edge_table_select = edge_table %>%
+      filter(r >= 0.07)
+```
+
+
+## Reason for not using p value cut off alone?
+Why do I warn against determining cutoffs using p values alone? 
+Because p value is a function of both effect size (r) and degrees of freedom (df). 
+Experiments with larger df produces smaller p values given the same effect size. 
+Let's make a graph to illustrate that:
+
+```{r}
+t_dist_example <- expand.grid(
+  df = c(2, 5, 10, 50, 80, 100),
+  r = c(0.2, 0.3, 0.5, 0.7, 0.8, 0.9, 0.99)
+  ) %>% 
+  mutate(t = r*sqrt((df-2)/(1-r^2))) %>% 
+  mutate(p = pt(q = t, df = df, lower.tail = F))
+  
+t_dist_example %>% 
+  ggplot(aes(x = r, y = -log10(p))) +
+  geom_line(aes(group = df, color = as.factor(df)), 
+            size = 1.1, alpha = 0.8) +
+  geom_hline(yintercept = 2, color = "grey20", size = 1, linetype = 4) +
+  labs(color = "df",
+       caption = "dotted line: P = 0.01") +
+  theme_classic() +
+  theme(
+    legend.position = c(0.2, 0.6),
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black"),
+    plot.caption = element_text(hjust = 0, size = 14)
+  )
+
+ggsave("t_dist_example.svg", height = 5, width = 6, bg ="white")
+ggsave("t_dist_example.png", height = 5, width = 6, bg ="white")
+```
+As you can see, large size experiments (df = 80 or 100), you would reach p < 0.01 with r value between 0.2 and 0.4.
+However, for experiments with df at 5, you won't get to p = 0.01 unless you have r values closer to 0.9. 
+
+> So it's really related to df. In order to disregard the effect, we can use bait genes to guid the cutoff. For now, I don't have one.
+
+# Module Selection
+
+Assign genes to different modules based on their correlation in between, that is, to detect the co-expressed genes.
+
+```{r}
+node_table = data.frame(
+    gene = c(edge_table_select$from, edge_table_select$to) %>% unique()
+  )
+
+head(node_table)
+dim(node_table)
+```
+
+
+```{r}
+my_network = graph_from_data_frame(
+    edge_table_select,
+    vertices = node_table,
+    directed = F
+  )
+```
+
+
+## How to determine the resolution for cluster leiden
+```{r}
+optimize_resolution = function(network, resolution) {
+    modules = network %>% 
+      cluster_leiden(resolution_parameter = resolution, 
+                     objective_function = "modularity")
+  
+    parsed_modules = data.frame(
+      gene_ID = names(membership(modules)),
+      module = as.vector(membership(modules))
+    )
+
+    num_module_5 = parsed_modules %>%
+      group_by(module) %>%
+      count() %>%
+      arrange(-n) %>%
+      filter(n >= 5) %>%
+      nrow() %>%
+      as.numeric()
+
+    num_genes_contained = parsed_modules %>%
+      group_by(module) %>%
+      count() %>%
+      arrange(-n) %>%
+      filter(n >= 5) %>%
+      ungroup() %>%
+      summarise(sum = sum(n)) %>%
+      as.numeric()
+
+    c(num_module_5, num_genes_contained)
+}
+```
+
+
+```{r}
+optimization_results_list = purrr::map(
+    .x = seq(from = 0.25, to = 5, by = 0.25),
+    .f = optimize_resolution, 
+    network = my_network
+    )
+
+optimization_results_df = as.data.frame(do.call(cbind, optimization_results_list))
+  
+optimization_results = optimization_results_df %>%
+    t() %>% 
+    cbind(resolution = seq(from = 0.25, to = 5, by = 0.25)) %>% 
+    as.data.frame() %>% 
+    rename(num_module = V1, num_contained_gene = V2)
+
+Optimize_num_module = optimization_results %>%
+    ggplot(aes(x = resolution, y = num_module)) +
+    geom_line(size = 1.1, alpha = 0.8, color = "dodgerblue2") +
+    geom_point(size = 3, alpha = 0.7) +
+    geom_vline(xintercept = 2, size = 1, linetype = 4) + # resolution_parameter vareis, start trying with 1.5
+    labs(x = "resolution parameter", y = "num. modules\nw/ >=5 genes") +
+    theme_classic() + theme(text = element_text(size = 14), axis.text = element_text(color = "black"))
+
+Optimize_num_gene = optimization_results %>%
+    ggplot(aes(x = resolution, y = num_contained_gene)) +
+    geom_line(size = 1.1, alpha = 0.8, color = "violetred2") +
+    geom_point(size = 3, alpha = 0.7) +
+    geom_vline(xintercept = 2, size = 1, linetype = 4) +
+    labs(x = "resolution parameter", y = "num. genes in\nmodules w/ >=5 genes") +
+    theme_classic() + theme(text = element_text(size = 14), axis.text = element_text(color = "black"))
+
+Optimize_num_module / Optimize_num_gene
+
+ggsave("resolution.svg", height = 5, width = 6, bg ="white")
+ggsave("resolution.png", height = 5, width = 6, bg ="white")
+```
+
+
+```{r}
+set.seed(987)
+
+modules = cluster_leiden(my_network, resolution_parameter = 2, objective_function = "modularity")
+
+my_network_modules = data.frame(
+    gene = names(membership(modules)),
+    module = as.vector(membership(modules))
+  )
+
+my_network_modules %>% 
+  group_by(module) %>% 
+  count() %>% 
+  arrange(-n) %>% 
+  filter(n >= 5) 
+```
+
+12 modules contain more than 5 genes, covering 2560 genes.
+
+```{r}
+my_network_modules
+```
+
+# DGE analysis
+
+```{r}
+apple_exp_log_wide = apple_exp_log_long %>%
+  dplyr::select(gene,timepoint,log_exp) %>%
+  pivot_wider(names_from = timepoint, values_from = log_exp) %>%
+  column_to_rownames("gene")
+
+head(apple_exp_log_wide)
+```
+
+```{r}
+# manually calculate log2fc
+# the reason for not using DESeq2 is they require raw count (integer) input
+# the reason for not using limma is they require multiple replicates for each condition
+
+log2_fc <- apple_exp_log_wide %>%
+  mutate(
+    log2FC_35_vs_60 = log2(`35 DAA` / `60 DAA`),  # cell division end vs starch accumulation
+    log2FC_87_vs_132 = log2(`87 DAA` / `132 DAA`),  # starch accumulation vs ripening 
+    log2FC_35_vs_132 = log2(`35 DAA` / `132 DAA`),  # cell division vs ripening
+    log2FC_60_vs_87 = log2(`60 DAA` / `87 DAA`)  # starch accumulation vs end
+  )
+
+head(log2_fc)
+```
+
+```{r}
+ripening_genes = log2_fc %>%
+  filter(log2FC_35_vs_132 < -1 & log2FC_87_vs_132 < -1 ) %>%
+  rownames() # In both comparison, significantly upregulated in ripening stages，可能与果实成熟相关。这些基因可能参与调控果实质地、风味、色泽的变化。
+
+starch_reg_genes = log2_fc %>%
+  filter(abs(log2FC_60_vs_87) > 1) %>% # > 1: 60 > 87; < -1 60 < 87
+  rownames()
+```
+
+
+```{r}
+set.seed(987)
+
+library(pheatmap)
+
+heatmap_data_ripen <- apple_exp_log_wide[ripening_genes, ]
+
+# Save as SVG
+# svglite("heatmap_ripening.svg", width = 5, height = 6)
+# heatmap
+pheatmap(
+  heatmap_data_ripen, 
+  cluster_rows = TRUE, 
+  cluster_cols = FALSE, 
+  show_rownames = TRUE, 
+  scale = "row"
+)
+# dev.off()
+```
+
+```{r}
+set.seed(987)
+
+library(pheatmap)
+
+heatmap_data_starch <- apple_exp_log_wide[starch_reg_genes, ]
+# svglite("heatmap_starch.svg", width = 5, height = 6)
+# heatmap
+pheatmap(
+  heatmap_data_starch, 
+  cluster_rows = TRUE, 
+  cluster_cols = FALSE, 
+  show_rownames = FALSE, 
+  scale = "row"
+)
+# dev.off()
+
+# many genes
+```
+
+```{r}
+pheatmap(
+  apple_exp_log_wide,
+  cluster_rows = FALSE, 
+  cluster_cols = FALSE, 
+  show_rownames = FALSE, 
+  scale = "row"
+)
+```
+
+
+
+
+```{r,eval=FALSE}
+sample_info = data.frame(
+  sample = colnames(apple_exp_log_wide),
+  group = c("T0", "T14", "T25", "T35", "T60", "T87", "T132", "T146")
+)
+
+sample_info$group <- factor(sample_info$group, levels = unique(sample_info$group))
+```
+
+
+# Enrichment caculation for certain genes 
+```{r}
+# Calculate enrichment for modules function
+# Make sure you got the module_info_df.
+# The format of module info df should be a 2 columns tibble with first column named gene, second column named module.
+# The interesting_genes part should be a set of genes.
+calculate_module_enrichment = function(module_info_df, interesting_genes) {
+  library(broom)
+  library(tidyverse)
+
+  df1 = module_info_df %>%
+    group_by(module) %>%
+    summarise(
+      raw_count = n(),
+    ) %>%
+    ungroup()
+  
+  df2 = data.frame(gene = interesting_genes) %>%
+    left_join(module_info_df, by = "gene") %>%
+    group_by(module) %>%
+    summarise(
+      raw_count = n(),
+    ) %>%
+    ungroup()
+  
+  all_modules = unique(df1$module)
+
+  result_df = tibble() 
+  
+  for (i in 1:length(all_modules)) {
+    module = all_modules[i]
+
+    raw_count_df1 = df1[df1$module == module, "raw_count"]
+    raw_count_df2 = na.omit(df2[df2$module == module, "raw_count"])
+
+    if (nrow(raw_count_df2) == 0) {
+        raw_count_df2 = 0
+    }
+    total_count_df1 = sum(df1$raw_count)
+    total_count_df2 = sum(df2$raw_count)
+    
+    contingency_table = matrix(c(sum(raw_count_df2), 
+         sum(raw_count_df1), 
+         total_count_df2 - sum(raw_count_df2),
+         total_count_df1 - sum(raw_count_df1)),
+       nrow = 2)
+    
+    fisher_test_result = tidy(fisher.test(contingency_table, alternative = "g"))
+    
+    percentage = paste(round(sum(raw_count_df2) / total_count_df2 * 100, 2), "% / ", 
+                        round(sum(raw_count_df1) / total_count_df1 * 100, 2), "%", sep = "")
+    
+    temp_df = tibble(module = module,
+                     raw_count = paste(raw_count_df2, raw_count_df1, sep = "/"),
+                     percentage = percentage)
+    
+    temp_df = bind_cols(temp_df, fisher_test_result) 
+    result_df = bind_rows(result_df, temp_df) 
+  }
+  
+  return(result_df)
+}
+```
+
+
+
+# Module trends
+
+```{r}
+module_means <- apple_exp_log_highvar %>%
+  dplyr::select(gene, timepoint, log_exp) %>%
+  left_join(my_network_modules, by = join_by(gene)) %>%
+  filter(module %in% c(3, 2, 4, 7, 9)) %>%
+  mutate(timepoint = factor(timepoint, levels = c("0 DAA", "14 DAA", "25 DAA", "35 DAA", "60 DAA", "87 DAA", "132 DAA", "146 DAA"))) %>%
+  group_by(module,timepoint) %>%
+  summarise(mean_exp = mean(log_exp, na.rm = TRUE), .groups = "drop")
+
+apple_exp_log_highvar %>%
+  dplyr::select(gene, timepoint, log_exp) %>%
+  left_join(my_network_modules, by = join_by(gene)) %>%
+  filter(module %in% c(3, 2, 4, 7, 9)) %>%
+  mutate(timepoint = factor(timepoint, levels = c("0 DAA", "14 DAA", "25 DAA", "35 DAA", "60 DAA", "87 DAA", "132 DAA", "146 DAA"))) %>%
+  ggplot(aes(x = timepoint, y = log_exp, group = gene)) +
+  # 大部分基因灰色线
+  geom_line(color = "grey", alpha = 0.5) +
+  # 添加模块均值粗线
+  geom_line(data = module_means, aes(x = timepoint, y = mean_exp, color = as.factor(module), group = module), size = 1.5) +
+  theme_minimal() +
+  labs(
+    title = "Expression Trends for Selected Modules",
+    x = "Timepoint (DAA)",
+    y = "Expression Value",
+    color = "Module"
+  ) +
+  facet_wrap(~module, scales = "free_y") +  # 分面展示每个模块
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggsave("expression_trends_top_modules.svg", height = 6, width =10, bg ="white")
+ggsave("expression_trends_top_modules.png", height = 6, width =10, bg ="white")
+```
+
+```{r}
+calculate_module_enrichment(my_network_modules,ripening_genes)
+```
+
+```{r}
+apple_exp_log_highvar %>%
+  dplyr::select(gene, timepoint, log_exp) %>%
+  left_join(my_network_modules, by = join_by(gene)) %>%
+  filter(gene %in% ripening_genes) %>%
+  mutate(timepoint = factor(timepoint, levels = c("0 DAA", "14 DAA", "25 DAA", "35 DAA", "60 DAA", "87 DAA", "132 DAA", "146 DAA"))) %>%
+  ggplot(aes(x = timepoint, y = log_exp, group = gene, color = gene)) +
+  geom_point() +
+  geom_line(size = 0.5, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "Expression Trends of Ripening Probes",
+    x = "Timepoint (DAA)",
+    y = "Log Expression Value",
+    color = "Gene"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")
+
+ggsave("expression_trends_ripening_log.svg", height = 5, width = 7, bg ="white")
+ggsave("expression_trends_ripening_log.png", height = 5, width = 7, bg ="white")
+```
+
+
+```{r}
+apple_exp %>%
+  group_by(`Genbank number`) %>%
+  mutate(gene = case_when( # mutate a new col 
+    n() > 1 ~ paste0(`Genbank number`, "_", row_number()), # "duplicates" will have more than 1 row. Add a symbol.
+    TRUE ~ `Genbank number` # keep the same for those not_duplicated
+  )) %>%
+  ungroup() %>%
+  rename_with(~ gsub(" Mean", "", .), contains("DAA")) %>% # Remove the "Mean" in colnames
+  pivot_longer(
+    cols = starts_with("0 DAA"):starts_with("146 DAA"), 
+    names_to = "timepoint", 
+    values_to = "expression"
+  ) %>%
+  dplyr::select(gene, timepoint, expression) %>%
+  left_join(my_network_modules, by = join_by(gene)) %>%
+  filter(gene %in% ripening_genes) %>%
+  mutate(timepoint = factor(timepoint, levels = c("0 DAA", "14 DAA", "25 DAA", "35 DAA", "60 DAA", "87 DAA", "132 DAA", "146 DAA"))) %>%
+  ggplot(aes(x = timepoint, y = expression, group = gene, color = gene)) +
+  geom_point() +
+  geom_line(size = 0.5, alpha = 0.8) +
+  theme_minimal() +
+  labs(
+    title = "Expression Trends of Ripening Probes",
+    x = "Timepoint (DAA)",
+    y = "Expression Value",
+    color = "Gene"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")
+
+ggsave("expression_trends_ripening.svg", height = 5, width = 7, bg ="white")
+ggsave("expression_trends_ripening.png", height = 5, width = 7, bg ="white")
+```
+
+```{r}
+calculate_module_enrichment(my_network_modules,bait_genes)
+```
+
+Seems like the CDKB2 and CKS1 homologues are assigned (clustered) together based on the trend while CDKB1 is separated.
+
+```{r}
+calculate_module_enrichment(my_network_modules,starch_reg_genes)
+```
 
